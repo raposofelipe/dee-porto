@@ -1,18 +1,18 @@
-Essa é a realização do Projeto 10-FDF, DEE-CADE(Departamento de Estudos Econômicos - Conselho Administrativo de Defesa Econômica).
-Aqui, é analisado o impacto que a privatização de refinarias teve sob os preços das refinarias. 
+Essa é a realização parcial do Projeto 10-FDF, DEE-CADE (Departamento de Estudos Econômicos - Conselho Administrativo de Defesa Econômica).
+Aqui, são criados modelos de classficação usando, sobretudo, de Random Forest 
 
 Esses são os conteúdos presentes neste repositório:
 
-1) "[refino] bases.R" - Leitura e tratamento de dados;
+1) "[porto] dados.Rmd" - Dados de movimentação de cargas portuárias
 
-2) "[refino] sobrepreço.R" - Replica os modelos da análise de sobrepreço; 
-
-3) "[refino] dados" - Dados de preço e outras variáveis usadas na precificação do setor.
+1) "[porto] classificacao.Rmd" - Análise preliminar dos dados, construção e tunagem de modelos de classificação
 
 Agradecimentos a:
  
   Fernado Franke - Coordenador da CECAN (Coordenação de Estudos de Condutas Anticompetitivas)
   
-  João Isídio Freitas Martins - Economista da CECAN 
+  Eduardo Fiuza - Economista da CECAN 
 
-15/12/2024
+ Patrícia Alessandra Morita Sakowski - Economista da CECAN 
+ 
+11/03/2025
