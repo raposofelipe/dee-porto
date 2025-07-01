@@ -1,0 +1,508 @@
+---
+title: "Leitura e Tratamento de dados"
+subtitle: "Projeto 10 FDF - Portos"
+author: "DEE - CECAN"
+date: "Última versão: 19/11/2024"
+output:
+  html_document:
+    df_print: paged
+---
+
+Objetivo: importação, tratamento e simples análises
+
+Esse é o pré-operacional da análise de classificação de NCMs. Assim, não traremos os resultados finais aqui nem explicações profundas.
+
+Para isso, verificar a continuação em 'S:/CECAN/Felipe Raposo/NCM - Porto"
+
+Estrutura do código, e seu conteúdo:
+  Seção 1 - Antaq
+  Seção 2 - Comex Stat
+  Seção 3- Ambas
+
+Agradecimento especial para Eduardo Fiuza, que estruturou como isso seria feito
+
+# Antaq
+## 1. Importação 
+
+Carregando pacotes 
+
+```{r}
+library(tidyverse)
+library(tm) # limpar string
+library(irlba) # lsa
+```
+
+Fonte: Estatístico Aquaviário - ANTAQ <https://web3.antaq.gov.br/ea/sense/index.html#pt>
+       Relação entre as bases - ANTAQ <https://web3.antaq.gov.br/ea/txt/modelo_dados.png>
+       
+```{r}
+setwd("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/Estatico Aquaviário (18-23) - ANTAQ")
+# anos
+anos <- 2018:2023
+
+# tipos de base
+tables <- c("Carga_Conteinerizada", "Carga", "Atracacao")
+
+for (table in tables) {
+  combined_data <- list()
+  
+  for (year in anos) {
+    file_path <- paste0(year, table, ".txt")
+    # Importação 
+    data <- data.table::fread(file_path, sep = ";", dec = ",", na.strings = c("Valor Discrepante", "Zero"))
+    
+    if (table == "Atracacao") {
+      # Apesar das bases de atracação serem informativas, a única informação relevante delas é Complexo Portuário
+      # sabendo que só há 1 por complexo por atrac, não há sentido manter as múltiplas observações 
+      data <- data %>% 
+        group_by(IDAtracacao, `Complexo Portuário`) %>% 
+        summarise(.groups = "drop") %>% 
+        mutate(Ano = year)
+    }
+    
+    if (table == "Carga") {
+      data <- data %>% select(c("IDAtracacao", "IDCarga", "Tipo Operação da Carga",
+                                "Carga Geral Acondicionamento", "ConteinerEstado",
+                                "Tipo Navegação", "Natureza da Carga", "Sentido", "CDMercadoria",
+                                "TEU", "QTCarga", "VLPesoCargaBruta"))
+    }
+    
+    # Armazenando
+    combined_data[[as.character(year)]] <- data
+  }
+  
+  # Juntando anos
+  anos_data <- data.table::rbindlist(combined_data)
+  
+  save_path <- paste0("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/Estatico Aquaviário (18-23) - ANTAQ/",
+                      table,"_allyrs.rds")
+  readr::write_rds(anos_data, save_path)
+  
+  rm(anos_data, combined_data)
+}
+
+rm(list = ls())
+```
+
+```{r}
+# relendo as 3 bases 
+atracacao <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/Estatico Aquaviário (18-23) - ANTAQ/Atracacao_allyrs.rds")
+
+carga <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/Estatico Aquaviário (18-23) - ANTAQ/Carga_allyrs.rds") 
+
+container <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/Estatico Aquaviário (18-23) - ANTAQ/Carga_Conteinerizada_allyrs.rds") # meio estranho as observações de container serem maior que em carga! checar com fiuza
+```
+
+## 2. Tratamento 
+
+Para pegar a baldeação, trazer Longo Curso por Tipo Operação
+
+```{r}
+carga <- carga %>% 
+  filter(str_detect(`Tipo Operação da Carga`, pattern = "Longo Curso")) # 4 categorias ao total
+
+container <- container %>% 
+  rename(VLPesoCargaBruta = VLPesoCargaConteinerizada, # dar nome aos bois
+         CDMercadoria = CDMercadoriaConteinerizada)
+```
+
+```{r}
+# juntando carga e atracacao
+df_carga <- carga %>% 
+  left_join(atracacao, by = "IDAtracacao")
+
+# pegando as informações das cargas conteinerizadas
+df_container <- df_carga %>% 
+  select(-VLPesoCargaBruta, -CDMercadoria) %>% 
+  right_join(container, by = "IDCarga") %>% 
+  filter(!is.na(`Complexo Portuário`),
+         !str_detect(CDMercadoria, "\\d*[a-zA-Z]\\d*"),
+         `Natureza da Carga` == "Carga Conteinerizada") # tem 1 (UMA !!!) ÚNICA SINGULAR UNIDADADE que não é container; assim, presumimos que essa seja container e acabou
+
+# pegando as informações dos não container
+df_carga <- df_carga %>% 
+  filter(`Natureza da Carga` != "Carga Conteinerizada") %>% 
+  # juntando com as de container
+  rbind(df_container)
+```
+
+Padronizando a forma de complexo 
+
+```{r}
+df_carga <- df_carga %>% 
+  mutate(`Complexo Portuário` = str_to_lower(`Complexo Portuário`) %>% # trazedno tudo para minúsculo
+           stringi::stri_trans_general("Latin-ASCII") %>% # tirando acentos
+           str_replace_all("[^\\w]", "_") %>%  # substitui não alfanumericos por _
+           str_replace_all("_+", "_"))
+```
+
+Padronizando a forma de NCM4
+
+```{r}
+df_carga <- df_carga %>% 
+  rename(NCM4 = CDMercadoria) %>%
+  # retirando o que não é uma categoria de NCM, ou seja, o que tem letras 
+  filter(!str_detect(NCM4, pattern = "[:alpha:]")) %>% 
+  mutate(NCM4 = as.numeric(NCM4))
+```
+
+Buscamos definir o que é importação ou não - informação dada pela operação de carga. Para as operações que sejam com BALDEAÇÃO: Se exportação, só considerar as que sejam com sentido Embarcados; Se importação, só considerar as que sejam com sentido Desembarcados.
+
+```{r}
+df_carga <- df_carga %>% 
+  mutate(Movimentação = 
+           case_when(
+             (str_detect(`Tipo Operação da Carga`, "Exportação") & 
+               str_detect(`Tipo Operação da Carga`, "com Baldeação") &
+               Sentido == "Embarcados") | 
+             (str_detect(`Tipo Operação da Carga`, "Exportação") & 
+               !str_detect(`Tipo Operação da Carga`, "com Baldeação")) ~ 0,
+             (str_detect(`Tipo Operação da Carga`, "Importação") & 
+               str_detect(`Tipo Operação da Carga`, "com Baldeação") &
+               Sentido == "Desembarcados") | 
+             (str_detect(`Tipo Operação da Carga`, "Importação") & 
+               !str_detect(`Tipo Operação da Carga`, "com Baldeação")) ~ 1,
+             .default = NA
+           )) %>% 
+  filter(!is.na(Movimentação)) # perdemos, então, em torno de 400 mil observações
+```
+
+### 2.1 NCMs PURAS
+
+É válido ressaltar que o código (CD) da mercadoria é dado pelo de NCM (Nomenclatura Comum do Mercosul)
+Definição: em todos os anos, a carga daquela NCM NUNCA foi de outra natureza
+
+```{r}
+ncm_pura <- df_carga %>%
+  group_by(NCM4, `Natureza da Carga`, Ano) %>%
+  summarise(n = n(), .groups = 'drop') %>% # quantas observações eu tenho ao total
+  group_by(NCM4, `Natureza da Carga`) %>%
+  summarise(year_count = n(), .groups = 'drop') %>% # em quantos anos eu tenho aquela natureza 
+  pivot_wider(names_from = `Natureza da Carga`, values_from = year_count,
+              values_fill = 0)  # aqui, NA em conteiner significa 0 (zero) 
+
+ncm_pura <- ncm_pura %>% 
+  mutate(zero_n = rowSums(select(., -NCM4) == 0)) %>% 
+  filter(zero_n == 3) %>% # só reforçando, há 4 tipos de natureza de carga ao total; logo, para ser puro eu preciso que 3 nunca tenham aparecido por  NCM
+  select(-zero_n)
+```
+
+Logo, as que ainda precisam ser classificadas são as seguintes. Originalmente eram 1270 mas só ficam para classificar 606*
+
+* Olhar a observação feita no LSA quanto a dwescrição, sobram 604 na verdade
+
+```{r}
+ncm_pura <- ncm_pura %>% 
+  pivot_longer(cols = -1, 
+               names_to = "Natureza da Carga", values_to = "n") %>%
+  filter(n != 0) %>% 
+  select(-n) # bom resslatar que todas aqui SÃO CONTAINER
+# para verificar isso, basta dar um reframe(.by = `Natureza da Carga`)
+
+# salvando pra mais tarde
+xlsx::write.xlsx(ncm_pura, file = "S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] NCM_PURA.xls") # um rds ia ser masi prático para depois, mas resolvi manter um xls pra facilitar a leitura depois
+```
+
+Limpando a base principal
+
+```{r}
+df_carga <- df_carga %>% 
+  filter(!NCM4 %in% ncm_pura$NCM4)
+```
+
+### 2.2 Porto PURO
+
+Façamos o mesmo para complexo portuário.
+
+```{r}
+porto_puro <- df_carga %>%
+  group_by(`Complexo Portuário`, `Natureza da Carga`, Ano) %>%
+  summarise(n = n(), .groups = 'drop') %>% # quantas observações eu tenho ao total
+  group_by(`Complexo Portuário`, `Natureza da Carga`) %>%
+  summarise(year_count = n(), .groups = 'drop') %>% # em quantos anos eu tenho aquela natureza 
+  pivot_wider(names_from = `Natureza da Carga`, values_from = year_count,
+              values_fill = 0)  # aqui, NA em conteiner significa 0 (zero) 
+
+porto_puro <- porto_puro %>% 
+  mutate(zero_n = rowSums(select(., -`Complexo Portuário`) == 0)) %>% 
+  filter(zero_n == 3) %>% # só reforçando, há 4 tipos de natureza de carga ao total; logo, para ser puro eu preciso que 3 nunca tenham aparecido por  NCM
+  select(-zero_n)
+```
+
+```{r}
+porto_puro <- porto_puro %>% 
+  pivot_longer(cols = -1, 
+               names_to = "Natureza da Carga", values_to = "n") %>%
+  filter(n != 0) %>% 
+  select(-n) # Areia Branca
+
+# salvando pra mais tarde
+xlsx::write.xlsx(porto_puro, file = "S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] PORTO_PURO.xls")
+```
+
+Limpando a base principal
+
+```{r}
+df_carga <- df_carga %>% 
+  filter(!`Complexo Portuário` %in% porto_puro$`Complexo Portuário`)
+```
+
+
+### 2.3 Combinações PURAS
+
+```{r}
+combinacao_pura <- df_carga %>% 
+  filter(NCM4 != "Não Classificado") %>% 
+  group_by(`Complexo Portuário`, NCM4, `Natureza da Carga`, Ano) %>%
+  summarise(n = n(), .groups = 'drop') %>% # quantas observações eu tenho ao total
+  group_by(`Complexo Portuário`, NCM4, `Natureza da Carga`) %>%
+  summarise(year_count = n(), .groups = 'drop') %>% # em quantos anos eu tenho aquela natureza 
+  pivot_wider(names_from = `Natureza da Carga`, values_from = year_count,
+              values_fill = 0)
+
+combinacao_pura <- combinacao_pura %>% 
+  mutate(zero_n = rowSums(select(., -NCM4, -`Complexo Portuário`) == 0)) %>% 
+  filter(zero_n == 3) %>% # só reforçando, há 4 tipos de natureza de carga ao total; logo, para ser puro eu preciso que 3 nunca tenham aparecido por  NCM
+  select(-zero_n)
+```
+
+```{r}
+combinacao_pura <- combinacao_pura %>% 
+  pivot_longer(cols = -(1:2), 
+               names_to = "Natureza da Carga", values_to = "n") %>% 
+  filter(n != 0) %>% 
+  select(-n)
+
+# salvando pra mais tarde
+xlsx::write.xlsx(combinacao_pura, file = "S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] COMBINACAO_PURA.xls")
+```
+
+```{r}
+combinacao_pura <- combinacao_pura %>% 
+  mutate(`Complexo Portuário` = str_to_lower(`Complexo Portuário`) %>% 
+           stringi::stri_trans_general("Latin-ASCII") %>% # tirando acentos
+           str_replace_all("[^\\w]", "_") %>%  # substitui não alfanumericos por _
+           str_replace_all("_+", "_"),
+         par_completo = paste(`Complexo Portuário`, NCM4, sep = "_"))
+```
+
+Limpando a base principal
+
+```{r}
+df_carga <- df_carga %>% 
+  mutate(par_completo = paste(`Complexo Portuário`, NCM4, sep = "_")) %>% 
+  filter(!par_completo %in% combinacao_pura$par_completo) # são 6201883 (6 milhões puras)
+```
+
+```{r}
+rm(list = ls()[ls() != "df_carga"])
+```
+
+## 3. LSA
+
+```{r}
+list_ncm4 <- df_carga %>% 
+  reframe(.by = NCM4) %>% 
+  mutate(NCM4 = as.numeric(NCM4)) %>% arrange(NCM4)
+```
+
+```{r warning=FALSE}
+descricao_ncm4 <- read.csv("S:/CECAN/Fernando Franke/Projeto 10 FDF - Portos/Mercado Relevante/R2/NCM_SH.csv", 
+                           sep = ';', encoding = 'UTF-8') %>% 
+  select(CO_SH4, NO_SH4_ING) %>% 
+  filter(CO_SH4 %in% list_ncm4$NCM4) %>% 
+  rename(Descrição = NO_SH4_ING) %>% 
+  mutate(Descrição = str_replace_all(Descrição, "[^[:alnum:]]", " ")) %>% # removendo caracteres alfanuméricos 
+  distinct() # removendo duplicatas
+```
+
+PS: Percebe-se que há dois códigos de NCM4 que não tem descrição (9797, 8888, 9898) que totalizam cerca de 30mil cargas. Assim, optamos por retirá-los da carga por não termos condições de classificarmos suas observações na  base da Comex Stat. 
+
+```{r}
+list_ncm4 %>% 
+  filter(!NCM4 %in% descricao_ncm4$CO_SH4)
+
+# retirando faltantes
+df_carga <- df_carga %>% 
+  filter(!NCM4 %in% c(8888, 9797,9898))
+
+# atualizando lista de NCM4
+list_ncm4 <- df_carga %>% 
+  reframe(.by = NCM4) %>% 
+  mutate(NCM4 = as.numeric(NCM4)) %>% arrange(NCM4)
+```
+
+Retomando o LSA, buscamos formar uma matriz documento-feature matrix (DFM), onde se representa a análise de texto incluindo características variadas
+
+```{r warning=FALSE}
+corpus <- Corpus(VectorSource(descricao_ncm4$Descrição)) # corpo de um texto
+
+# pré-processamento, limpando a string
+# reforçando: prefixos tônicos (pós, pé e pró) sempre são hifenizados
+
+corpus <- tm_map(corpus, removePunctuation)                  # Remove punctuation
+corpus <- tm_map(corpus, removeWords, stopwords("english"))  # Remove stopwords - palavras vazias
+corpus <- tm_map(corpus, stripWhitespace)                    # Remove extra whitespace
+corpus <- tm_map(corpus, content_transformer(tolower))       # Convert to lowercase
+
+# DTM - matriz de frequência de termos
+dtm <- DocumentTermMatrix(corpus, control = list(bounds = list(global = c(1, Inf))))
+
+dtm <- dtm[seq_len(length(corpus)), ] # garantindo que contém todos os documentos (descrições)
+dtm <- as.matrix(dtm)
+```
+
+```{r warning=FALSE}
+# espaço semantico latente
+lsa_result <- irlba::irlba(dtm, nv = min(11, nrow(dtm), ncol(dtm)) - 1) # mantendo k = 10 dimensões
+
+# dfm 
+document_feature_matrix <- lsa_result$u %>% 
+  as.tibble()
+lsa_result <- descricao_ncm4 %>% 
+  cbind(document_feature_matrix) %>% 
+  rename(NCM4 = CO_SH4)
+
+# salvando 
+xlsx::write.xlsx(lsa_result, file = "S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] RESULTADO_LSA.xls")
+
+# passando para a base principal
+df_carga <- df_carga %>% 
+  left_join(lsa_result, by = "NCM4") %>% 
+  select(Ano, everything())
+```
+
+```{r}
+colnames(df_carga) <- colnames(df_carga) %>% 
+  str_to_lower() %>% 
+  str_replace_all("[^\\w]", "_") %>%
+  stringi::stri_trans_general("Latin-ASCII")
+```
+
+```{r}
+rm(list = ls()[ls() != "df_carga"])
+
+# salvando 
+saveRDS(df_carga, "S:/CECAN/Felipe Raposo/NCM - Porto/2. data/[porto] df_carga.rds")
+```
+
+# Comex
+
+## 1. Leitura
+
+```{r}
+ana <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/dados_imp_exportacao_agregados_nov_sfiltro")
+```
+
+```{r}
+ncm_pura <- readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] NCM_PURA.xls")
+
+porto_puro <- readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] PORTO_PURO.xls")
+
+combinacao_pura <- readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] COMBINACAO_PURA.xls")
+```
+
+## 2. Tratamento
+
+```{r}
+combinacao_pura <- combinacao_pura %>% 
+  mutate(par_completo = paste(`Complexo Portuário`, NCM4, sep = "_"))
+```
+
+```{r}
+ana_enxugado <- ana %>%
+  filter(CO_ANO %in% 2018:2023,
+         selecionar == 1) %>% 
+  mutate(porto = str_to_lower(porto) %>% 
+           stringi::stri_trans_general("Latin-ASCII") %>% # tirando acentos
+           str_replace_all("[^\\w]", "_") %>%  # substitui não alfanumericos por _
+           str_replace_all("_+", "_"),
+         NCM4 = as.numeric(NCM4),
+         par_completo = paste(porto, NCM4, sep = "_")) %>% 
+  # puros
+  filter(!NCM4 %in% ncm_pura$NCM4,
+         porto != "areia_branca",
+         !par_completo %in% combinacao_pura$par_completo) %>% # o que não é portuário (0)
+  rename("ncm2" = NCM2,
+         "complexo_portuario" = porto, # complexo_portuario
+         "movimentacao" = operacao, # movimentacao
+         "peso" = KG_LIQUIDO # peso
+         )
+
+ana_enxugado %>% write_rds("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] comex_quasilimpo.rds")
+```
+
+```{r}
+ana_18 <- ana %>%
+  filter(CO_ANO %in% 2018:2023, 
+         selecionar == 1)
+
+ana_18 %>% write_rds("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] comex_18_23.rds")
+```
+
+```{r}
+rm(list = ls())
+```
+
+
+# Ambas
+
+## 1. Leitura
+
+Relendo
+
+```{r}
+comex_limpo <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] comex_quasilimpo.rds")
+df_carga <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] df_carga.rds")
+```
+
+## 2. O que não tem na comex
+
+NCM4 
+```{r}
+df_carga %>% 
+  filter(!ncm4 %in% comex_limpo$NCM4) %>% 
+  reframe(observacoes = n(), peso_total = sum(vlpesocargabruta), .by = ncm4) %>% 
+  xlsx::write.xlsx(file = "S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] NCM_FALTANTE.xlsx")
+```
+
+Par completo (combinação NCM e complexo)
+
+```{r}
+df_carga %>% 
+  filter(!par_completo %in% comex_limpo$par_completo) %>% 
+  reframe(observacoes = n(), peso_total = sum(vlpesocargabruta), .by = par_completo) %>% 
+  xlsx::write.xlsx(file = "S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] COMBINACAO_FALTANTE.xlsx")
+```
+
+```{r}
+participacao <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] cortes_participacao.rds")
+
+participacao <- participacao %>% 
+  select(natureza_da_carga, corte, n, porcentagem_observacoes, porcentagem_peso, 
+         porcentagem_valor) %>% 
+  rename('Natureza da Carga' = natureza_da_carga,
+         Corte = corte,
+         'Nº de observações' = n,
+         'Porcentagem das observações' = porcentagem_observacoes,
+         'Participação do peso (kg)' = porcentagem_peso,
+         'Participação do Valor FOB (R$)' = porcentagem_valor)
+```
+
+```{r}
+library(huxtable)
+
+ht <- participacao %>% 
+  filter(Corte %in% c("puros", "10%")) %>% 
+  huxtable() %>% 
+  set_all_padding(4)  %>%  
+      set_outer_padding(0) %>% 
+      set_number_format(3) %>% 
+      set_bold(row = 1, col = everywhere) %>% 
+      set_bottom_border(row = 1, col = everywhere) %>% 
+      set_width(0.4) %>% 
+  set_caption("Tabela 1: Particiapação de cada natureza da carga na COMEX, previamente à classificação")
+
+quick_html(ht, file = "S:/CECAN/Felipe Raposo/NCM - Porto/4. notas/[porto] participacao_tabela.html", open = F)
+```
+

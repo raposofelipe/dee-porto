@@ -1,0 +1,652 @@
+---
+title: "Classificação de origem da carga"
+subtitle: "Projeto 10 FDF - Portos"
+author: "DEE - CECAN"
+date: 'Última versão: 16/10/2024'
+output:
+  html_document:
+    df_print: paged
+---
+
+Objetivo: classificar a natureza das cargas portuárias
+
+Assim, ele se divide em duas partes:
+  Seção 0 - Leitura
+  Seção 1 - Tratamento
+  Seção 2 - Classificação
+
+# 0. Leitura
+
+Diretório
+
+```{r setup}
+knitr::opts_knit$set(root.dir = "S:/CECAN/Felipe Raposo/NCM - Porto")
+```
+
+Carregando pacotes
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+library(tidyverse)
+library(h2o)
+```
+
+## Antaq 
+
+Carregando dados
+
+```{r}
+# Importando a prévia já feita. Para mais informações, acessar "S:/CECAN/Felipe Raposo/NCM - Porto/[porto] dados.Rmd"
+
+df_carga <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] df_carga.rds")# base principal 
+
+resultado_lsa <- readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] RESULTADO_LSA.xls") # LSA
+```
+
+## Comex
+
+```{r}
+comex <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] comex_quasilimpo.rds")
+```
+
+# 1. Tratamento
+
+## 1.1  Antaq
+
+```{r}
+# Selecionando o que vamos usar
+# O porquê da escolha dessas são elaborados mais tarde 
+df_carga <- df_carga %>% 
+  ungroup() %>% 
+  select_at(-c(2:7, 9, 11:12, 16))
+
+# Padronizando nome das variáveis
+colnames(df_carga) <- colnames(df_carga) %>% str_to_lower() %>% str_replace_all("[^\\w]", "_") %>%
+  stringi::stri_trans_general("Latin-ASCII")
+```
+
+```{r warning=FALSE}
+# Padronizando texto dos complexos portuários
+df_carga <- df_carga %>% 
+  mutate(# Pegando os primeiros dois dígitos da ncm
+         ncm2 = substr(ncm4, 1, 2)) %>% 
+  rename("peso" = vlpesocargabruta)
+```
+
+Tirando o que não tem na comex!
+
+```{r}
+df_carga <- df_carga %>% 
+  filter(!par_completo %in% readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] COMBINACAO_FALTANTE.xlsx"), 
+         !ncm4 %in% readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/Dados/[porto] NCM_FALTANTE.xlsx"))
+```
+
+```{r warning=FALSE}
+df_carga %>% glimpse()
+```
+
+### 1.1.1 Listas
+
+Listas usadas posteriormente nas divisões da base principal, buscando otimizar o processamento!
+A divisão segue as combinações de natureza de carga
+
+
+Par completo
+
+
+```{r}
+par_combinacao <- df_carga %>% 
+  group_by(natureza_da_carga, par_completo) %>% 
+  summarise(n = n(), .groups = "drop") %>% 
+  group_by(par_completo, natureza_da_carga) %>% 
+  summarise(count = n(), .groups = 'drop') %>% 
+  pivot_wider(names_from = natureza_da_carga, values_from = count,
+              values_fill = 0)
+
+par_combinacao <- par_combinacao %>% 
+  mutate(one_n = rowSums(select(., -par_completo) == 1)) %>% 
+  filter(one_n != 1) %>% # isso não faz muuito sentido já que eu já tirei os puros, mas é bom reforçar
+  select(-one_n) %>% 
+  pivot_longer(cols = -1, 
+               names_to = "natureza_da_carga", values_to = "n") %>% 
+  filter(n != 0)
+
+# diz qual a combinação de naturezas que temos pra cada par
+par_combinacao <- par_combinacao %>% 
+  group_by(par_completo) %>%
+  summarise(combinacao = paste(sort(unique(natureza_da_carga)), collapse = ", ")) %>% 
+  ungroup()
+```
+
+```{r}
+# transformando em lista
+list_combinacao <- par_combinacao %>% 
+  group_by(combinacao) %>%
+  summarise(pares_completos = list(par_completo)) %>%
+  ungroup()
+
+# o que vai virar lixos depois na comex
+list_nao_container <- list_combinacao %>% 
+  filter(!str_detect(combinacao, "Conteinerizada"))
+
+list_combinacao <- list_combinacao %>% 
+  filter(str_detect(combinacao, "Conteinerizada"))
+
+list_combinacao <- setNames(as.list(list_combinacao$pares_completos), list_combinacao$combinacao)
+list_nao_container <- setNames(as.list(list_nao_container$pares_completos), list_nao_container$combinacao)
+```
+
+Vendo o que tem dentro de cada lista!
+
+```{r}
+for (grp in 1:7) {
+  df_carga %>% 
+  filter(par_completo %in% list_combinacao[[grp]]) %>%
+    reframe(n = n(), .by = natureza_da_carga) %>% 
+    mutate(porcentagem = n / sum(n)) %>% 
+    print()
+}
+```
+
+```{r}
+# vai pro lixo no da ana
+for (grp in 1:4) {
+  df_carga %>% 
+    filter(par_completo %in% list_nao_container[[grp]]) %>% 
+    reframe(n = n(), .by = natureza_da_carga) %>% 
+    mutate(porcentagem = n / sum(n)) %>% 
+    print()
+}
+```
+
+
+NCM4
+
+
+```{r}
+ncm_combinacao <- df_carga %>% 
+  group_by(natureza_da_carga, ncm4) %>% 
+  summarise(n = n(), .groups = "drop") %>% 
+  group_by(ncm4, natureza_da_carga) %>% 
+  summarise(count = n(), .groups = 'drop') %>% 
+  pivot_wider(names_from = natureza_da_carga, values_from = count,
+              values_fill = 0)
+
+ncm_combinacao <- ncm_combinacao %>% 
+  mutate(one_n = rowSums(select(., -ncm4) == 1)) %>% 
+  filter(one_n != 1) %>% # isso não faz muuito sentido já que eu já tirei os puros, mas é bom reforçar
+  select(-one_n) %>% 
+  pivot_longer(cols = -1, 
+               names_to = "natureza_da_carga", values_to = "n") %>% 
+  filter(n != 0)
+
+# diz qual a combinação de naturezas que temos pra cada par
+ncm_combinacao <- ncm_combinacao %>% 
+  group_by(ncm4) %>%
+  summarise(combinacao = paste(sort(unique(natureza_da_carga)), collapse = ", ")) %>% 
+  ungroup()
+```
+
+```{r}
+# transformando em lista
+list_ncm_combinacao <- ncm_combinacao %>% 
+  group_by(combinacao) %>%
+  summarise(ncms = list(ncm4)) %>%
+  ungroup()
+
+# o que vai virar lixos depois na comex
+list_nao_ncm <- list_combinacao %>% 
+  filter(!str_detect(combinacao, "Conteinerizada"))
+
+list_nao_ncm <- setNames(as.list(list_nao_container$pares_completos), list_nao_container$combinacao)
+```
+
+Limpando!
+
+```{r}
+comex <- comex %>% 
+  filter(# limpando pares completos!
+         !ncm4 %in% list_nao_ncm[[1]],
+         !ncm4 %in% list_nao_ncm[[2]],
+         !ncm4 %in% list_nao_ncm[[3]])
+
+df_carga <- df_carga %>% 
+  filter(# limpando pares completos!
+         !ncm4 %in% list_nao_ncm[[1]],
+         !ncm4 %in% list_nao_ncm[[2]],
+         !ncm4 %in% list_nao_ncm[[3]])
+```
+
+## 1.2 Comex
+
+```{r}
+comex %>% 
+  glimpse()
+```
+
+Limpando! 
+
+```{r}
+comex <- comex %>% 
+  filter(# limpando pares completos!
+         !par_completo %in% list_nao_container[[1]],
+         !par_completo %in% list_nao_container[[2]],
+         !par_completo %in% list_nao_container[[3]],
+         !par_completo %in% list_nao_container[[4]],
+         selecionar != 0) %>% 
+  mutate(NCM4 = as.numeric(NCM4),
+         operacao = if_else(operacao == "Importação", 1, 0)) %>% 
+  left_join(resultado_lsa %>% 
+              select_at(-1), by = "NCM4") %>% 
+  select(-NCM4) %>% 
+  rename("ncm2" = NCM2,
+         "complexo_portuario" = porto, # complexo_portuario
+         "movimentacao" = operacao, # movimentacao
+         "peso" = KG_LIQUIDO # peso
+         )
+```
+
+```{r}
+# apagando o que é desnecessário
+rm(par_combinacao, grp, resultado_lsa)
+```
+
+
+# 2. Classificação
+
+**Modelos de classificação** são algoritmos que visam categorizar dados em grupos predefinidos. Funcionam analisando padrões em dados para construir regras ou limites de decisão. Após treinados, podem prever a classe de novas observações. Dessa forma, o que buscamos categorizar aqui é a natureza da carga a partir das características suas (o grupo da NCM, o peso e variáveis de análise da descrição da NCM) e do porto (qual seu complexo portuário e qual a modalidade de movimentação (exportação ou importação)). 
+
+A fim de reduzir o viés na avaliação e evitar overfitting, proporcionando uma estimativa mais precisa do desempenho real do modelo, usamos de uma **Validação Cruzada** (Cross-validation com nfolds = 5) - técnica usada para avaliar o desempenho de modelos de aprendizado de máquina, verificando sua capacidade de generalização. O dataset é dividido em 5 partes, e em cada iteração uma parte é usada como teste enquanto as outras servem para treino. Isso se repete 5 vezes, garantindo que cada amostra seja avaliada ao menos uma vez. Ao final, calcula-se a média das métricas obtidas.
+
+Além disso, com a intenção de reduzir erros individuais e explorando a diversidade entre os modelos, usaremos de combinações de múltiplos algoritmos (**Ensemble**) para melhorar a precisão das previsões. Em suma, a ideia é empilhar vários modelos, permitindo que eles complementem suas forças individuais, melhorando a precisão e robustez da previsão final ao minimizar os erros de cada modelo isolado. O processo ocorre em duas camadas:
+  - Na primeira, diferentes modelos são treinados separadamente (como regressões, árvores de decisão ou redes neurais). Cada modelo base gera suas próprias previsões para o conjunto de dados. 
+  - Na segunda, essas previsões geradas pelos modelos da primeira camada são usadas como entrada para um modelo de nível superior, conhecido como **meta-modelo**. Esse meta-modelo aprende a combinar as previsões dos modelos base, ajustando pesos ou identificando padrões de erro em cada um deles. 
+
+A análise da descrição da NCM foi feita por **LSA**. Latent Semantic Analysis (Análise Semântica Latente) é uma técnica de processamento de linguagem natural usada para identificar relações ocultas entre palavras e documentos em um grande conjunto de textos. O LSA transforma o texto em uma matriz de termos e documentos e, em seguida, aplica a decomposição de valores singulares (SVD) para reduzir a dimensionalidade. Isso permite captar padrões semânticos, mesmo quando palavras não aparecem explicitamente juntas, melhorando a análise e categorização de textos.
+
+No mais, é válido ainda ressaltar alguns pontos:
+  - As **NCM** (Nomenclatura Comum do Mercosul, organizando mercadorias em transações e seguindo o SH (Sistema Harmonizado) - padrão da Organização Mundial das Alfândegas) foram agrupadas pelos **dois primeiros** dígitos (*categoria geral do produto*) de um total de oito
+  - NÃO foi usado CDTUP (Código da Instalação) e usamos o complexo portuário
+
+
+Por último, os modelos propostos originalmente foram:
+
+  a. SVM (Support Vector Machine) - Busca a melhor fronteira para separar dados em classes, maximizando a margem entre os pontos mais próximos de cada classe (vetores de suporte);
+  b. GLM (Modelo linear generalizado/Generalized linear model) - Estende modelos lineares tradicionais para acomodar respostas não normais, ligando as variáveis independentes ao resultado através de funções link;
+  c. Redes Neurais - Estrutura computacional imita neurônios do cérebro, ajustando pesos sinápticos para aprender padrões complexos e realizar predições.
+
+
+Os utilizados aqui são:
+
+  1. Random Forest Classification - Combina múltiplas árvores de decisão para melhorar a precisão, usando amostras aleatórias de dados e predições por voto majoritário;
+  2. Naive Bayes - assume que todas as variáveis preditoras são condicionalmente independentes entre si, dado a classe. O algoritmo multiplica as probabilidades individuais de cada atributo para cada classe e escolhe a classe com a maior probabilidade resultante;
+  3. GLM;
+  4. Redes Neurais.
+  
+Assim, do essemble original, substituí (a) por (1) e (2).
+
+Em seguida, prediremos a base da comex stat tendo os modelos criados. 
+
+## 2.1 NCM2
+
+```{r}
+resultados_grupo <- vector("list",7)
+predito_grupo <- vector("list",7)
+tempo_grupo <-  vector("list",7)
+```
+
+```{r}
+for (grp in 2:7) {
+  # 1. Construção de modelo
+  # iniciando h2o
+  h2o::h2o.init()
+  # pegando só o que me interessa da base
+  ensaio <- df_carga %>% 
+    filter(par_completo %in% list_combinacao[[grp]]) %>% 
+    select(-ano,-ncm4, -par_simples) %>% 
+    mutate(natureza_da_carga = str_to_lower(natureza_da_carga) %>% 
+               stringi::stri_trans_general("Latin-ASCII") %>% 
+               str_replace_all("[^\\w]", "_") %>% 
+               as.factor(), # natureza em classes
+             ncm2 = as.factor(ncm2), # NCM em classes
+             complexo_portuario = as.factor(complexo_portuario), 
+           movimentacao = as.factor(movimentacao))
+  
+  set.seed(64)
+  trainIndex <- caret::createDataPartition(ensaio$par_completo, p = 0.7, list = FALSE)
+  
+  train_data <- ensaio[trainIndex, -16]
+  test_data <- ensaio[-trainIndex, -16]
+  
+  Y <- "natureza_da_carga"
+  X <- setdiff(names(train_data), Y)
+  
+  # random forest 
+  random_comeca <- Sys.time()
+  print(paste0("[", grp, "] Random Forest (início): ", random_comeca))
+  
+  random_model <- h2o::h2o.randomForest(x = X, y = Y,
+                                   training_frame = train_data %>% h2o::as.h2o(),
+                                   nfolds = 5,
+                                   keep_cross_validation_predictions = TRUE,
+                                   ignore_const_cols = FALSE, 
+                                   seed = 64)
+  
+  random_performance <- h2o::h2o.performance(model = random_model, newdata = test_data %>% h2o::as.h2o())
+  
+  random_acaba <- Sys.time()
+  print(paste0("[", grp, "] Random Forest (fim): ", random_acaba))
+  
+  # naive Bayes
+  naive_comeca <- Sys.time()
+  print(paste0("[", grp, "] Naive Bayes (início): ", Sys.time()))
+  
+  naive_model <- h2o::h2o.naiveBayes(x = X, y = Y, 
+                                     training_frame = train_data %>% h2o::as.h2o(),
+                                     nfolds = 5,
+                                     keep_cross_validation_predictions = TRUE,
+                                     seed = 64)
+  naive_pred <- h2o::h2o.predict(naive_model, newdata = test_data %>% h2o::as.h2o())
+  naive_performance <- h2o::h2o.performance(model = naive_model, 
+                                            newdata = test_data %>% h2o::as.h2o())
+  naive_acaba <- Sys.time()
+  print(paste0("[", grp, "] Naive Bayes (fim): ", naive_acaba))
+  
+  # glm
+  glm_comeca <- Sys.time()
+  print(paste0("[", grp, "] GLM (início): ", glm_comeca))
+  
+  glm_model <- h2o::h2o.glm(x = X, y = Y, 
+                            training_frame = train_data %>% h2o::as.h2o(),
+                            nfolds = 5,
+                            keep_cross_validation_predictions = TRUE,
+                            ignore_const_cols = FALSE,
+                            seed = 64)
+  glm_pred <- h2o::h2o.predict(glm_model, newdata = test_data %>% h2o::as.h2o())
+  glm_performance <- h2o::h2o.performance(model = glm_model,
+                                          newdata = test_data %>% h2o::as.h2o())
+  glm_acaba <- Sys.time()
+  print(paste0("[", grp, "] GLM (fim): ", glm_acaba))
+  
+  # rede neural
+  neural_comeca <- Sys.time()
+  print(paste0("[", grp, "] Rede Neural (início): ", neural_comeca))
+  
+  neural_model <- h2o::h2o.deeplearning(x = X, y = Y, 
+                                        training_frame = train_data %>% h2o::as.h2o(),
+                                        nfolds = 5,
+                                        keep_cross_validation_predictions = TRUE,
+                                        seed = 64)
+  
+  neural_performance <- h2o::h2o.performance(model = neural_model,
+                                             newdata = test_data %>% h2o::as.h2o())
+  
+  neural_acaba <- Sys.time()
+  print(paste0("[", grp, "] Rede Neural (fim): ", neural_acaba))
+  
+  # ensemble
+  ensemble_comeca <- Sys.time()
+  print(paste0("[", grp, "] Ensemble (início): ", ensemble_comeca))
+  
+  ensemble_model <- h2o::h2o.stackedEnsemble(x = X,
+                                       y = Y,
+                                       training_frame = train_data %>% h2o::as.h2o(),
+                                       base_models = list(random_model, naive_model,
+                                                          glm_model, neural_model),
+                                       metalearner_algorithm = "deeplearning",
+                                       metalearner_nfolds = 5,
+                                       seed = 64)
+  
+  ensemble_performance <- h2o::h2o.performance(ensemble_model, newdata = test_data %>% h2o::as.h2o())
+  
+  ensemble_acaba <- Sys.time()
+  print(paste0("[", grp, "] Ensemble (fim): ", ensemble_acaba))
+  
+  
+  
+  
+  # 2. Predizendo 
+  comex_pred <- comex %>% 
+    filter(par_completo %in% list_combinacao[[grp]]) %>%
+    as.h2o()
+  
+  comex_pred <- h2o::h2o.predict(object = ensemble_model, newdata = comex_pred)
+  
+  
+  
+  
+  # 3. Resultados
+  resultados_grupo[[grp]] <- list("model" = ensemble_model, 
+                                  "performance" = ensemble_performance)
+  
+  # tempo 
+  tempo_grupo[[grp]] <- tibble(especificacao = c("todo","random", "naive", "glm", "neural", "ensemble"), 
+                               inicio = c(random_comeca, random_comeca, naive_comeca, glm_comeca, neural_comeca, ensemble_comeca), 
+                               fim = c(ensemble_acaba, random_acaba, naive_acaba, glm_acaba, neural_acaba, ensemble_acaba))
+  
+  # predito
+  predito_grupo[[grp]] <- comex_pred
+  
+  
+  
+  
+  # apagando o que não é necessário ter salvo
+  rm(list = ls()[!ls() %in% c("df_carga", # base principal
+                              "predito_grupo",
+                              "resultados_grupo", # resultados: NCM grupo
+                              "tempo_grupo", # tempo que demorou pra rodar
+                              "list_combinacao", "list_nao_container", # listas de pares
+                              "comex")]) 
+  
+  h2o.removeAll()
+ }
+```
+
+```{r}
+h2o::h2o.removeAll()
+```
+
+### 2.1.1 Grandão
+
+Por uma questão de processamento, não conseguimos manter rodando uma base tão grande como a do grupo 1! Assim, optei por aleatorizar os pares, dar um número de 1 a 3 e quebrar a base
+
+```{r}
+resultados_grupo <- vector("list",7)
+predito_grupo <- vector("list",7)
+tempo_grupo <-  vector("list",7)
+```
+
+```{r}
+tempo_grupo[[1]] <- vector("list", 5)
+predito_grupo[[1]] <- vector("list", 5)
+resultados_grupo[[1]] <- vector("list", 5)
+```
+
+```{r}
+# base de treino
+ensaio <- df_carga %>% 
+    filter(par_completo %in% list_combinacao[[1]]) %>% 
+    select(-ano,-ncm4, -par_simples) %>% 
+    mutate(natureza_da_carga = str_to_lower(natureza_da_carga) %>% 
+               stringi::stri_trans_general("Latin-ASCII") %>% 
+               str_replace_all("[^\\w]", "_"), # natureza em classes
+             )
+
+set.seed(64)
+ensaio <- ensaio %>% 
+  sample_n(n()) %>% 
+  mutate(index = rep(1:5, length.out = n()))
+
+rm(df_carga)
+```
+
+```{r}
+# base de predição 
+comex <- comex %>% 
+  filter(par_completo %in% list_combinacao[[1]])
+```
+
+```{r}
+for (grp in 1:5) {
+  #iniciando h2o
+  h2o::h2o.init()
+  # pegando só o que me interessa da base
+  ensaio_red <- ensaio %>% 
+    filter(index == grp) %>% 
+    select(-index) %>% 
+    mutate(natureza_da_carga = as.factor(natureza_da_carga),
+           ncm2 = as.factor(ncm2), # NCM em classes
+           complexo_portuario = as.factor(complexo_portuario), 
+           movimentacao = as.factor(movimentacao))
+  
+  # divindo treino e teste
+  set.seed(64)
+  trainIndex <- caret::createDataPartition(ensaio_red$par_completo, p = 0.7, list = FALSE)
+  
+  train_data <- ensaio_red[trainIndex, -16]
+  test_data <- ensaio_red[-trainIndex, -16]
+  
+  Y <- "natureza_da_carga"
+  X <- setdiff(names(train_data), Y)
+  
+  # random forest 
+  random_comeca <- Sys.time()
+  print(paste0("[1.", grp, "] Random Forest (início): ", random_comeca))
+  
+  random_model <- h2o::h2o.randomForest(x = X, y = Y,
+                                   training_frame = train_data %>% h2o::as.h2o(),
+                                   nfolds = 5,
+                                   keep_cross_validation_predictions = TRUE,
+                                   ignore_const_cols = FALSE, 
+                                   seed = 64)
+  
+  random_performance <- h2o::h2o.performance(model = random_model, newdata = test_data %>% h2o::as.h2o())
+  
+  random_acaba <- Sys.time()
+  print(paste0("[1.", grp, "] Random Forest (fim): ", random_acaba))
+  
+  # naive Bayes
+  naive_comeca <- Sys.time()
+  print(paste0("[1.", grp, "] Naive Bayes (início): ", Sys.time()))
+  
+  naive_model <- h2o::h2o.naiveBayes(x = X, y = Y, 
+                                     training_frame = train_data %>% h2o::as.h2o(),
+                                     nfolds = 5,
+                                     keep_cross_validation_predictions = TRUE,
+                                     seed = 64)
+  naive_pred <- h2o::h2o.predict(naive_model, newdata = test_data %>% h2o::as.h2o())
+  naive_performance <- h2o::h2o.performance(model = naive_model, 
+                                            newdata = test_data %>% h2o::as.h2o())
+  naive_acaba <- Sys.time()
+  print(paste0("[1.", grp, "] Naive Bayes (fim): ", naive_acaba))
+  
+  # glm
+  glm_comeca <- Sys.time()
+  print(paste0("[1.", grp, "] GLM (início): ", glm_comeca))
+  
+  glm_model <- h2o::h2o.glm(x = X, y = Y, 
+                            training_frame = train_data %>% h2o::as.h2o(),
+                            nfolds = 5,
+                            keep_cross_validation_predictions = TRUE,
+                            ignore_const_cols = FALSE,
+                            seed = 64)
+  glm_pred <- h2o::h2o.predict(glm_model, newdata = test_data %>% h2o::as.h2o())
+  glm_performance <- h2o::h2o.performance(model = glm_model,
+                                          newdata = test_data %>% h2o::as.h2o())
+  glm_acaba <- Sys.time()
+  print(paste0("[1.", grp, "] GLM (fim): ", glm_acaba))
+  
+  # rede neural
+  neural_comeca <- Sys.time()
+  print(paste0("[1.", grp, "] Rede Neural (início): ", neural_comeca))
+
+  neural_model <- h2o::h2o.deeplearning(x = X, y = Y,
+                                        training_frame = train_data %>% h2o::as.h2o(),
+                                        nfolds = 5,
+                                        keep_cross_validation_predictions = TRUE,
+                                        seed = 64)
+
+  neural_performance <- h2o::h2o.performance(model = neural_model,
+                                             newdata = test_data %>% h2o::as.h2o())
+
+  neural_acaba <- Sys.time()
+  print(paste0("[1.", grp, "] Rede Neural (fim): ", neural_acaba))
+  
+  # ensemble
+  ensemble_comeca <- Sys.time()
+  print(paste0("[1.", grp, "] Ensemble (início): ", ensemble_comeca))
+  
+  ensemble_model <- h2o::h2o.stackedEnsemble(x = X,
+                                       y = Y,
+                                       training_frame = train_data %>% h2o::as.h2o(),
+                                       base_models = list(random_model, naive_model,
+                                                          glm_model,
+                                                          neural_model
+                                                          ),
+                                       metalearner_algorithm = "deeplearning",
+                                       metalearner_nfolds = 5,
+                                       seed = 64)
+  
+  ensemble_performance <- h2o::h2o.performance(ensemble_model, newdata = test_data %>% h2o::as.h2o())
+  
+  ensemble_acaba <- Sys.time()
+  print(paste0("[1.", grp, "] Ensemble (fim): ", ensemble_acaba))
+  
+  
+  
+  
+  
+  # 2. Predizendo 
+  comex_pred <- comex %>% 
+    filter(par_completo %in% list_combinacao[[grp]]) %>%
+    as.h2o()
+  
+  comex_pred <- h2o::h2o.predict(object = ensemble_model, newdata = comex_pred)
+  
+  
+  
+  
+  
+  # 3. Resultados
+  resultados_grupo[[1]][[grp]] <- list("model" = ensemble_model, 
+                                       "performance" = ensemble_performance)
+  
+  # tempo 
+  tempo_grupo[[1]][[grp]] <- tibble(especificacao = c("todo",
+                                                      "random", 
+                                                      "naive", "glm", 
+                                                      "neural",
+                                                      "ensemble"), 
+                               inicio = c(random_comeca,
+                                          random_comeca,
+                                          naive_comeca, 
+                                          glm_comeca,
+                                          neural_comeca, 
+                                          ensemble_comeca), 
+                               fim = c(ensemble_acaba, 
+                                       random_acaba, 
+                                       naive_acaba,
+                                       glm_acaba, 
+                                       neural_acaba,
+                                       ensemble_acaba))
+  
+  # predito
+  predito_grupo[[1]][[grp]] <- comex_pred
+  
+  # apagando o que não é necessário ter salvo
+  rm(list = ls()[!ls() %in% c("predito_grupo",
+                              "resultados_grupo", # resultados: NCM grupo
+                              "tempo_grupo", # tempo que demorou pra rodar
+                              "list_combinacao", "list_nao_container",
+                              "ensaio", "comex")]) # listas de pares
+  
+  h2o::h2o.removeAll()
+}
+```
+
+```{r}
+rm(ensaio)
+```
+
+```{r}
+save.image("S:/CECAN/Felipe Raposo/NCM - Porto/Resultados/[porto] classificacao_resultados")
+```

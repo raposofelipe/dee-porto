@@ -1,0 +1,698 @@
+---
+title: "Classificação de origem da carga"
+author: "DEE - CECAN"
+date: 'Última versão: 15/01/2024'
+output:
+  html_notebook: default
+  pdf_document: default
+  df_print: paged
+  html_document: null
+subtitle: "Projeto 10 FDF - Portos"
+---
+
+Objetivo: Classificação da natureza de carga na comex
+
+Para tal, treinamos um ensemble seguindo dados da ANTAQ que, posterioremtne, será aplicado sobre os da COMEX STAT.
+
+'S:/CECAN/Felipe Raposo/NCM - Porto/(...).Rmd"
+
+Estrutura do código, e seu conteúdo:
+  Seção 0 - Leitura
+  Seção 1 - Tratamento
+  Seção 2 - Classificação
+
+Agradecimento especial para Eduardo Fiuza, que estruturou como isso seria feito
+
+# 0. Leitura
+
+Carregando dados e pacotes. 
+
+```{r setup, include=FALSE}
+# Diretório
+knitr::opts_knit$set(root.dir = "S:/CECAN/Felipe Raposo/NCM - Porto/ 1. R")
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Pacotes
+library(tidyverse)
+library(h2o)
+```
+
+## Antaq 
+
+```{r, results='hide'}
+# Importando a prévia já feita. Para mais informações, acessar "S:/CECAN/Felipe Raposo/NCM - Porto/[porto] dados.Rmd"
+
+df_carga <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/[porto] df_carga.rds")# base principal 
+
+resultado_lsa <- readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/[porto] RESULTADO_LSA.xls") # LSA
+```
+
+## Comex
+
+```{r}
+comex <- readRDS("S:/CECAN/Felipe Raposo/NCM - Porto/2. data/[porto] comex_quasilimpo.rds")
+```
+
+# 1. Tratamento
+
+```{r}
+df_carga %>% 
+  glimpse()
+```
+
+## 1.1  Antaq
+
+```{r}
+# Selecionando o que vamos usar
+# O porquê da escolha dessas são elaborados mais tarde 
+df_carga <- df_carga %>% 
+  ungroup() %>% 
+  select_at(-c(2:7, 9, 11:12, 17))
+```
+
+Pares (combinação entre NCM e porto)
+
+```{r warning=FALSE}
+# Padronizando texto dos complexos portuários
+df_carga <- df_carga %>% 
+  mutate(# Pegando os primeiros dois dígitos da ncm
+         ncm2 = substr(ncm4, 1, 2)) %>% 
+  rename("peso" = vlpesocargabruta)
+```
+
+Tirando o que não tem na comex!
+
+```{r, results='hide'}
+df_carga <- df_carga %>% 
+  filter(!par_completo %in% 
+           readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] COMBINACAO_FALTANTE.xlsx")$par_completo, 
+         !ncm4 %in% readxl::read_excel("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] NCM_FALTANTE.xlsx")$ncm4)
+```
+
+### 1.1.1 Mistos sem conteiner 
+
+
+NCM4
+
+
+```{r}
+ncm_combinacao <- df_carga %>% 
+  group_by(natureza_da_carga, ncm4) %>% 
+  summarise(n = n(), .groups = "drop") %>% 
+  group_by(ncm4, natureza_da_carga) %>% 
+  summarise(count = n(), .groups = 'drop') %>% 
+  pivot_wider(names_from = natureza_da_carga, values_from = count,
+              values_fill = 0)
+
+ncm_combinacao <- ncm_combinacao %>% 
+  mutate(one_n = rowSums(select(., -ncm4) == 1)) %>% 
+  filter(one_n != 1) %>% # isso não faz muuito sentido já que eu já tirei os puros, mas é bom reforçar
+  select(-one_n) %>% 
+  pivot_longer(cols = -1, 
+               names_to = "natureza_da_carga", values_to = "n") %>% 
+  filter(n != 0)
+
+# diz qual a combinação de naturezas que temos pra cada par
+ncm_combinacao <- ncm_combinacao %>% 
+  group_by(ncm4) %>%
+  summarise(combinacao = paste(sort(unique(natureza_da_carga)), collapse = ", ")) %>% 
+  ungroup()
+```
+
+```{r}
+# transformando em lista
+list_combinacao <- ncm_combinacao %>% 
+  group_by(combinacao) %>%
+  summarise(ncms = list(ncm4)) %>%
+  ungroup()
+
+# o que vai virar lixos depois na comex
+list_nao_container <- list_combinacao %>% 
+  filter(!str_detect(combinacao, "Conteinerizada"))
+
+list_nao_container <- setNames(as.list(list_nao_container$ncms), list_nao_container$combinacao) # VAZIOZÃO
+```
+
+
+Par completo 
+
+
+```{r}
+par_combinacao <- df_carga %>% 
+  group_by(natureza_da_carga, par_completo) %>% 
+  summarise(n = n(), .groups = "drop") %>% 
+  group_by(par_completo, natureza_da_carga) %>% 
+  summarise(count = n(), .groups = 'drop') %>% 
+  pivot_wider(names_from = natureza_da_carga, values_from = count,
+              values_fill = 0)
+
+par_combinacao <- par_combinacao %>% 
+  mutate(one_n = rowSums(select(., -par_completo) == 1)) %>% 
+  filter(one_n != 1) %>% # isso não faz muuito sentido já que eu já tirei os puros, mas é bom reforçar
+  select(-one_n) %>% 
+  pivot_longer(cols = -1, 
+               names_to = "natureza_da_carga", values_to = "n") %>% 
+  filter(n != 0)
+
+# diz qual a combinação de naturezas que temos pra cada par
+par_combinacao <- par_combinacao %>% 
+  group_by(par_completo) %>%
+  summarise(combinacao = paste(sort(unique(natureza_da_carga)), collapse = ", ")) %>% 
+  ungroup()
+```
+
+```{r}
+# transformando em lista
+list_combinacao <- par_combinacao %>% 
+  group_by(combinacao) %>%
+  summarise(pares_completos = list(par_completo)) %>%
+  ungroup()
+
+# o que vai virar lixos depois na comex
+list_nao_container <- list_combinacao %>% 
+  filter(!str_detect(combinacao, "Conteinerizada"))
+
+list_nao_container <- setNames(as.list(list_nao_container$pares_completos), list_nao_container$combinacao)
+```
+
+Limpando!
+
+```{r}
+comex <- comex %>% 
+  filter(# limpando pares completos!
+         !par_completo %in% list_nao_container[[1]],
+         !par_completo %in% list_nao_container[[2]],
+         !par_completo %in% list_nao_container[[3]])
+
+df_carga <- df_carga %>% 
+  filter(# limpando pares completos!
+         !par_completo %in% list_nao_container[[1]],
+         !par_completo %in% list_nao_container[[2]],
+         !par_completo %in% list_nao_container[[3]])
+```
+
+Colocando container 0 e não 1
+
+```{r warning=FALSE}
+df_carga <- df_carga %>% 
+  mutate(natureza_da_carga = if_else(natureza_da_carga == "Carga Conteinerizada", 0, 1) %>% as.factor())
+```
+
+### 1.1.2 Matriz(es) de corte
+
+Contruindo uma matriz de porcentagem, ou seja, o quanto que aquele par completo tem de cada natureza da carga.
+
+```{r}
+matriz <- df_carga %>% 
+  group_by(par_completo, natureza_da_carga) %>% 
+  summarise(peso_total = sum(peso)) %>% 
+  mutate(porcentagem = round(peso_total/sum(peso_total), 3)) %>% 
+  select(-peso_total) %>% 
+  pivot_wider(names_from = "natureza_da_carga", names_prefix = "p_",
+              values_from = "porcentagem", values_fill = 0)
+```
+
+CORTE! Pegando só o que tá na meiuca pra classificar para o corte de 10 e o de 5
+
+```{r}
+df_carga_meiuca <- df_carga %>% 
+  left_join(matriz, by = "par_completo") %>% 
+  filter(p_0 > 0.1, p_0 < 0.9)
+```
+
+```{r}
+df_carga_meiuca5 <- df_carga %>% 
+  left_join(matriz, by = "par_completo") %>% 
+  filter(p_0 > 0.05, p_0 < 0.95)
+```
+
+## 1.2 Comex
+
+
+```{r}
+comex %>% 
+  glimpse()
+```
+
+```{r}
+resultado_lsa <- resultado_lsa %>% 
+  select_at(-1)
+
+colnames(resultado_lsa) <- colnames(resultado_lsa) %>% str_to_lower()
+```
+
+Corte de 10% 
+
+```{r}
+comex_calda <- comex %>% 
+  rename(ncm4 = NCM4) %>% 
+  mutate(ncm4 = as.numeric(ncm4),
+         movimentacao = if_else(movimentacao == "exp", 0, 1)) %>% 
+  left_join(resultado_lsa, by = "ncm4") %>%
+  left_join(matriz, by = "par_completo") %>% 
+  select(-p_1) %>% 
+  filter(p_0 <= 0.1 | p_0 >= 0.9) %>% 
+  mutate(p_0 = if_else(p_0 >= 0.9, 0, 1)) %>% 
+  rename(natureza_da_carga = p_0)
+```
+
+```{r}
+comex_meiuca <- comex %>% 
+  rename(ncm4 = NCM4) %>% 
+  mutate(ncm4 = as.numeric(ncm4),
+         movimentacao = if_else(movimentacao == "exp", 0, 1)) %>% 
+  left_join(resultado_lsa, by = "ncm4") %>%
+  left_join(matriz, by = "par_completo") %>% 
+  select(-p_1) %>% 
+  filter(((p_0 > 0.1 & p_0 < 0.9)|is.na(p_0)))
+```
+
+```{r}
+nrow(comex_calda) + nrow(comex_meiuca) == nrow(comex)
+```
+
+Corte de 5%
+
+```{r}
+comex_calda5 <- comex %>% 
+  rename(ncm4 = NCM4) %>% 
+  mutate(ncm4 = as.numeric(ncm4),
+         movimentacao = if_else(movimentacao == "exp", 0, 1)) %>% 
+  left_join(resultado_lsa, by = "ncm4") %>%
+  left_join(matriz, by = "par_completo") %>% 
+  select(-p_1) %>% 
+  filter(p_0 <= 0.05 | p_0 >= 0.95) %>% 
+  mutate(p_0 = if_else(p_0 >= 0.95, 0, 1)) %>% 
+  rename(natureza_da_carga = p_0)
+```
+
+```{r}
+comex_meiuca5 <- comex %>% 
+  rename(ncm4 = NCM4) %>% 
+  mutate(ncm4 = as.numeric(ncm4),
+         movimentacao = if_else(movimentacao == "exp", 0, 1)) %>% 
+  left_join(resultado_lsa, by = "ncm4") %>%
+  left_join(matriz, by = "par_completo") %>% 
+  select(-p_1) %>% 
+  filter(((p_0 > 0.05 & p_0 < 0.95)|is.na(p_0)))
+```
+
+# 2. Classificação
+
+**Modelos de classificação** são algoritmos que visam categorizar dados em grupos predefinidos. Funcionam analisando padrões em dados para construir limites de decisão. Após treinados, podem prever a classe de novas observações. Dessa forma, o que buscamos categorizar aqui é a natureza da carga a partir das características suas (o grupo da NCM, o peso e variáveis de análise da descrição da NCM) e do porto (qual seu complexo portuário e qual a modalidade de movimentação (exportação ou importação)). 
+
+A fim de reduzir o viés na avaliação e evitar overfitting, proporcionando uma estimativa mais precisa do desempenho real do modelo, usamos de uma **Validação Cruzada** (Cross-validation com nfolds = 5) - técnica usada para avaliar o desempenho de modelos de aprendizado de máquina, verificando sua capacidade de generalização. O dataset é dividido em 5 partes, e em cada iteração uma parte é usada como teste enquanto as outras servem para treino. Isso se repete 5 vezes, garantindo que cada amostra seja avaliada ao menos uma vez. Ao final, calcula-se a média das métricas obtidas.
+
+Além disso, com a intenção de reduzir erros individuais e explorando a diversidade entre os modelos, usaremos de combinações de múltiplos algoritmos (**Ensemble**) para melhorar a precisão das previsões. Em suma, a ideia é empilhar vários modelos, permitindo que eles complementem suas forças individuais, melhorando a precisão e robustez da previsão final ao minimizar os erros de cada modelo isolado. O processo ocorre em duas camadas:
+  - Na primeira, diferentes modelos são treinados separadamente (como regressões, árvores de decisão ou redes neurais). Cada modelo base gera suas próprias previsões para o conjunto de dados. 
+  - Na segunda, essas previsões geradas pelos modelos da primeira camada são usadas como entrada para um modelo de nível superior, conhecido como **meta-modelo**. Esse meta-modelo aprende a combinar as previsões dos modelos base, ajustando pesos ou identificando padrões de erro em cada um deles. 
+
+A análise da descrição da NCM foi feita por **LSA**. Latent Semantic Analysis (Análise Semântica Latente) é uma técnica de processamento de linguagem natural usada para identificar relações ocultas entre palavras e documentos em um grande conjunto de textos. O LSA transforma o texto em uma matriz de termos e documentos e, em seguida, aplica a decomposição de valores singulares (SVD) para reduzir a dimensionalidade. Isso permite captar padrões semânticos, mesmo quando palavras não aparecem explicitamente juntas, melhorando a análise e categorização de textos.
+
+No mais, é válido ainda ressaltar alguns pontos:
+  - As **NCM** (Nomenclatura Comum do Mercosul, organizando mercadorias em transações e seguindo o SH (Sistema Harmonizado) - padrão da Organização Mundial das Alfândegas) foram agrupadas pelos **dois primeiros** dígitos (*categoria geral do produto*) de um total de oito
+  - NÃO foi usado CDTUP (Código da Instalação) e usamos o complexo portuário
+
+
+Por último, os modelos propostos originalmente foram:
+
+  a. SVM (Support Vector Machine) - Busca a melhor fronteira para separar dados em classes, maximizando a margem entre os pontos mais próximos de cada classe (vetores de suporte);
+  b. GLM (Modelo linear generalizado/Generalized linear model) - Estende modelos lineares tradicionais para acomodar respostas não normais, ligando as variáveis independentes ao resultado através de funções link;
+  c. Redes Neurais - Estrutura computacional imita neurônios do cérebro, ajustando pesos sinápticos para aprender padrões complexos e realizar predições.
+
+
+Os utilizados aqui são:
+
+  1. RFC (Random Forest Classification) - Combina múltiplas árvores de decisão para melhorar a precisão, usando amostras aleatórias de dados e predições por voto majoritário. Já é um ensemble em si (Bootstrap Aggregation ou bagging) 
+  2. GBM (Gradient Boosting Machine) - Combina múltiplos modelos simples (árvores de decisão) para criar previsões robustas, otimizando o erro residual iterativamente.
+  
+Assim, do ensemble original, substituí (a) por (1) e (2).
+
+Em seguida, prediremos a base da comex stat tendo os modelos criados. 
+
+## 2.0.1 Performance 
+
+Partindo para a parte final, chegamos na **avaliação** da performance. Por conta dp desbalancemanto dos dados, essa terá que levar em conta a classe minoritária, ou seja, o que não é conteiner ("natureza_da_carga" == 1). Assim, os modelos tomarão como base duas métricas centrais: (1) Precision; (2) Recall. 
+
+A primeira (precision) é a proporção de verdadeiros positivos entre todos os casos classificados como positivos, representando o quão confiáveis são as **previsões positivas do modelo**. A segunda (recall ou  sensibilidade) é a proporção de verdadeiros positivos entre todos os casos realmente positivos, medindo a capacidade do modelo de identificar corretamente os casos positivos. 
+
+Com esses, contói-se a  **CURVA PR** (Precision-Recall), usada aqui dado o desbalanceamento dos nossos dados na variável de classificação. Essa, assim, é uma representação gráfica que avalia o desempenho de um modelo de classificação binária em diferentes limiares de decisão (pontos de decisão, ex: 0.05 vai ser 0 e tudo abaixo 1). Ela é formada plotando a precisão (eixo y) contra o recall (eixo x), considerando múltiplos limiares. 
+
+À medida que o limiar de decisão é ajustado, o modelo pode identificar mais casos positivos (aumentando o recall), mas frequentemente à custa de incluir mais falsos positivos, reduzindo a precisão.
+
+Dessa forma, passamos para a métrica mais importante para avaliação do nosso modelo: **AUC (Area Under Curve)-PR**. 
+
+## 2.1 Treinamento
+
+### 2.1.1 Dados
+
+```{r results='hide'}
+# iniciando h2o
+  h2o::h2o.init(max_mem_size = "25g")
+  # pegando só o que me interessa da base
+  ensaio <- df_carga_meiuca %>% 
+    # filter(index == grp) %>% 
+    select(-ano,-ncm4
+           # , -index
+           ) %>% 
+    mutate(natureza_da_carga = natureza_da_carga %>% as.factor(), # natureza em classes
+             ncm2 = as.factor(ncm2), # NCM em classes
+             complexo_portuario = as.factor(complexo_portuario), 
+           movimentacao = as.factor(movimentacao))
+  
+  set.seed(64)
+  trainIndex <- caret::createDataPartition(ensaio$par_completo, p = 0.7, list = FALSE)
+  
+  train_data <- ensaio[trainIndex, -c(4)]
+  test_data <- ensaio[-trainIndex, -c(4)]
+  
+  Y <- "natureza_da_carga"
+  X <- setdiff(names(train_data), Y)
+```
+
+### 2.1.2 Modelos Base
+
+#### RFC
+
+```{r}
+random_comeca <- Sys.time()
+print(paste0("Random Forest (início): ", random_comeca))
+  
+# random search: não testa todas as possíveis combinações de hiperparâmetros de maneira exaustiva;
+# vai escolhendo aleatoriamente combinações até chegar uma hora que não tem ganho
+# muitas vezes traz o mínimo local e não global!
+
+hyper_params_rfc <- list(ntrees = seq(50, 450, by = 25), # nº de árvores, default = 50
+                         
+                         max_depth = seq(0, 60, by = 5) # tamanho da árvore, default = 20
+                         )
+
+search_criteria <- list(strategy = "RandomDiscrete",
+                        max_models = 192,
+                        max_runtime_secs = 28800,
+                        stopping_rounds = 60,
+                        stopping_metric = "AUCPR",
+                        stopping_tolerance = 1e-5,
+                        seed = 64)
+
+rfc_grid_i <- h2o::h2o.grid(algorithm = "randomForest" ,
+                            x = X, 
+                            y = Y, 
+                            grid_id = "rfc_grid_i",
+                            training_frame = train_data %>% as.h2o(), 
+                            nfolds = 5,
+                            keep_cross_validation_predictions = TRUE,
+                            ignore_const_cols = FALSE,
+                            hyper_params = hyper_params_rfc,
+                            search_criteria = search_criteria
+                            )
+
+rfc_grid_ii <- h2o::h2o.getGrid(grid_id = "rfc_grid_i", sort_by = "AUCPR", decreasing = FALSE)
+
+rfc_model <- h2o::h2o.getModel(rfc_grid_ii@model_ids[[length(rfc_grid_ii@model_ids)]])
+```
+
+```{r}
+rfc_performance <- h2o::h2o.performance(rfc_model, 
+                                        test_data %>% as.h2o())
+plot(rfc_performance, type = "pr")
+h2o.aucpr(rfc_performance)
+```
+
+Salvando 
+
+```{r}
+for (id in 1:length(rfc_grid_ii@model_ids)) {
+  rfc_nome <- paste("rfc_grid_model", id, sep = "_")
+  rfc_grid_model_id <- h2o.getModel(rfc_grid_ii@model_ids[[id]])
+  
+  assign(rfc_nome, rfc_grid_model_id)
+  
+  rm(list = c("rfc_nome", "rfc_grid_model_id"))
+}
+
+save(list = ls()[str_detect(ls(), "rfc_grid_model_")] %>% 
+       append(c("rfc_model", "rfc_performance", "rfc_grid_i", "rfc_grid_ii")), 
+     file = "S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.2 model/[porto] resultado_rfc.RData")
+
+rm(list = ls()[str_detect(ls(), "rfc_grid_model_")])
+```
+
+Refazendo o rfc com os MESMOS parâmetros pra ver se o resultado se mantém 
+
+```{r}
+rfc_model <- h2o.randomForest(x = X, y = Y, 
+                               training_frame = train_data %>% h2o::as.h2o(), 
+                               keep_cross_validation_predictions = T,
+                               nfolds = 5, 
+                               fold_assignment = "Random",
+                               seed = 97, 
+                               ignore_const_cols = FALSE, 
+                               calibration_method = "PlattScaling",
+                               histogram_type = "UniformAdaptive",
+                               categorical_encoding = "Enum",
+                               # hiperparâmetros do grid 
+                               ntrees = 275, 
+                               max_depth = 40)
+
+rfc_performance <- h2o.performance(rfc_model, test_data %>% as.h2o())
+```
+
+```{r}
+plot(rfc_performance, type = "pr")
+h2o.aucpr(rfc_performance)
+```
+
+##### Default
+
+```{r results='hide'}
+  random_model <- h2o::h2o.randomForest(x = X, y = Y,
+                                   training_frame = train_data %>% h2o::as.h2o(),
+                                   stopping_rounds = 5,
+                                   stopping_tolerance = 5e-4,
+                                   stopping_metric = "AUCPR",
+                                   nfolds = 5,
+                                   keep_cross_validation_predictions = TRUE,
+                                   ignore_const_cols = FALSE,
+                                   seed = 64)
+
+  random_performance <- h2o::h2o.performance(model = random_model, newdata = test_data %>% h2o::as.h2o())
+```
+
+```{r}
+plot(random_performance, type = "pr")
+h2o.aucpr(random_performance)
+```
+
+```{r}
+# Métricas construídas para cada limiar
+random_performance@metrics[["thresholds_and_metric_scores"]]
+```
+
+```{r}
+# Matriz de confusão
+random_performance@metrics[["cm"]][["table"]]
+
+
+random_acaba <- Sys.time()
+print(paste0("Random Forest (fim): ", random_acaba))
+```
+
+
+#### GBM
+
+```{r}
+# random grid of models
+gbm_comeca <- Sys.time()
+print(paste0(" GBM (início): ", gbm_comeca))
+
+# Hiperparâmetros
+hyper_params_gbm <- list(learn_rate = seq(0.01, 0.1, by = 0.01), # capacidade de aprendizado de uma árvore para a outra, default de 0.1
+                         max_depth = seq(10, 60, by = 10), # profundidade da árvore, default de 5
+                         ntrees = seq(25, 550, by = 75)) 
+
+search_criteria <- list(strategy = "RandomDiscrete",
+                        max_models = 420/2,
+                        max_runtime_secs = 720,
+                        stopping_metric = "AUCPR",
+                        stopping_rounds = 40,
+                        stopping_tolerance = 1e-5,
+                        seed = 64)
+
+# grid
+gbm_grid_i <- h2o.grid(algorithm = "gbm",
+                     grid_id = "gbm_grid_i",
+                     x = X,
+                     y = Y,
+                     training_frame = train_data %>% as.h2o(),
+                     nfolds = 5,
+                     keep_cross_validation_predictions = TRUE,
+                     hyper_params = hyper_params_gbm,
+                     search_criteria = search_criteria)
+
+gbm_grid_ii <- h2o.getGrid("gbm_grid_i", sort_by = "aucpr", decreasing = FALSE)
+
+gbm_model <- h2o.getModel(gbm_grid_ii@model_ids[[length(gbm_grid_ii@model_ids)]])
+
+gbm_performance <- h2o::h2o.performance(model = gbm_model,
+                                        newdata = test_data %>% h2o::as.h2o())
+```
+
+```{r}
+gbm_performance@metrics$max_criteria_and_metric_scores
+gbm_performance@metrics$cm
+```
+
+```{r}
+plot(gbm_performance, type = "pr")
+h2o.aucpr(gbm_performance)
+h2o.F1(gbm_performance)
+```
+##### Default
+
+```{r}
+# gbm
+  gbm_model2 <- h2o::h2o.gbm(x = X, y = Y,
+                            training_frame = train_data %>% h2o::as.h2o(),
+                            nfolds = 5,
+                            keep_cross_validation_predictions = TRUE,
+                            ignore_const_cols = FALSE,
+                            seed = 64)
+
+  gbm_performance2 <- h2o::h2o.performance(model = gbm_model2,
+                                          newdata = test_data %>% h2o::as.h2o())
+  gbm_acaba <- Sys.time()
+  print(paste0(" GBM (fim): ", gbm_acaba))
+```
+
+```{r}
+plot(gbm_performance2, type = "pr")
+h2o.aucpr(gbm_performance2)
+h2o.F1(gbm_performance2)
+
+gbm_acaba <- Sys.time()
+print(paste0(" GBM (fim): ", gbm_acaba))
+```
+
+### 2.1.3 Ensemble 
+
+
+```{r}
+# ensemble
+ensemble_comeca <- Sys.time()
+print(paste0(" Ensemble (início): ", ensemble_comeca))
+  
+ensemble_model <- h2o::h2o.stackedEnsemble(x = X,
+                                           y = Y,
+                                           training_frame = train_data %>% h2o::as.h2o(),
+                                           base_models = c(gbm_model, rfc_model),
+                                           metalearner_algorithm = "drf",
+                                           metalearner_nfolds = 5,
+                                           seed = 64)
+  
+ensemble_performance <- h2o::h2o.performance(ensemble_model, newdata = test_data %>% h2o::as.h2o())
+  
+# ensemble_model2 <- h2o::h2o.stackedEnsemble(x = X, 
+#                                             y = Y, 
+#                                             training_frame = train_data %>% h2o::as.h2o(),
+#                                             base_models = gbm_grid_i@model_ids,
+#                                             metalearner_algorithm = "drf", 
+#                                             metalearner_nfolds = 5, 
+#                                             seed = 64)
+# 
+# ensemble_performance2 <- h2o::h2o.performance(ensemble_model2,newdata = test_data %>% h2o::as.h2o())
+# 
+# ensemble_model3 <- h2o::h2o.stackedEnsemble(x = X,
+#                                            y = Y,
+#                                            training_frame = train_data %>% h2o::as.h2o(),
+#                                            base_models = c(gbm_model2, random_model),
+#                                            metalearner_algorithm = "drf",
+#                                            metalearner_nfolds = 5,
+#                                            seed = 64)
+#   
+# ensemble_performance3 <- h2o::h2o.performance(ensemble_model3, newdata = test_data %>% h2o::as.h2o())
+```
+
+```{r}
+ensemble_performance@metrics[["cm"]][["table"]]
+```
+
+```{r}
+h2o::h2o.varimp(gbm_model)
+h2o::h2o.varimp(rfc_model)
+```
+
+```{r}
+# png("S:/CECAN/Felipe Raposo/NCM - Porto/4. notas/[porto] pr_ensemble.png")
+plot(ensemble_performance, type = "pr")
+# dev.off()
+```
+
+
+### 2.1.4 Predição
+
+```{r} 
+comex_pred <- h2o::h2o.predict(object = ensemble_model,
+                               newdata = ((comex_meiuca %>% as.h2o())[-1,])) %>% as_tibble()
+
+# corte de 5%
+comex_pred5 <- h2o::h2o.predict(object = ensemble_model,
+                               newdata = ((comex_meiuca5 %>% as.h2o())[-1,])) %>% as_tibble()
+```
+
+### 2.1.5 Salvando
+
+Salvando os resultados
+
+```{r}
+save(list = c("random_model", "random_performance",
+              "rfc_model", "rfc_performance",
+              "gbm_model", "gbm_performance",
+              "gbm_model2", "gbm_performance2",
+              "ensemble_model", "ensemble_performance",
+              "ensemble_model2", "ensemble_performance2",
+              "ensemble_model3", "ensemble_performance3"),
+     file = "S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.2 model/[porto] resultado_modelos_peq_bin_10.RData")
+```
+
+```{r}
+comex_meiuca <- comex_pred %>% 
+  rename(natureza_da_carga = predict) %>% 
+  select(natureza_da_carga) %>% 
+  cbind(comex_meiuca) %>% 
+  select(-p_0) 
+
+comex_meiuca %>% 
+  write_rds("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] comex_meiuca_10.rds")
+
+comex_meiuca %>% 
+  rbind(comex_calda) %>% 
+  write_rds("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] comex_classificados.rds")
+```
+
+```{r}
+setdiff(names(comex_meiuca), names(comex_calda))
+```
+
+Corte de 5%
+
+```{r}
+comex_meiuca5 <- comex_pred5 %>% 
+  rename(natureza_da_carga = predict) %>% 
+  select(natureza_da_carga) %>% 
+  cbind(comex_meiuca) %>% 
+  select(-p_0) 
+
+comex_meiuca5 %>% 
+  write_rds("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] comex_meiuca_5.rds")
+
+comex_meiuca5 %>% 
+  rbind(comex_calda) %>% 
+  write_rds("S:/CECAN/Felipe Raposo/NCM - Porto/3. output/3.1 data/[porto] comex_classificados_5.rds")
+```
+
+```{r}
+setdiff(names(comex_meiuca), names(comex_calda))
+```
+
